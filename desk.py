@@ -880,7 +880,9 @@ def _follow_color_scheme(app):
     def feed(self, data):
         for m in report.finditer(data):
             app.call_from_thread(app.set_dark, m[1] == "1")
-        return orig(self, report.sub("", data))
+        rest = report.sub("", data)
+        # An empty feed means end of input to Textual, so a chunk that was only a report feeds nothing.
+        return orig(self, rest) if rest or not data else ()
     _xp.XTermParser.feed = feed
 
 
@@ -898,3 +900,4 @@ if __name__ == "__main__":
     app = Desk()
     _follow_color_scheme(app)
     app.run()
+    sys.exit(app.return_code)
