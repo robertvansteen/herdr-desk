@@ -19,7 +19,7 @@ A card is one branch. For example, the branch `eng-142-retry-webhooks` with a wo
 - `git`, `jq`, `curl`
 - [`gh`](https://cli.github.com), logged in: PRs come from `gh api graphql`
 - [`wt` (worktrunk)](https://github.com/max-sixty/worktrunk): launching an agent (`a`) and removing a worktree (`x`) use it
-- Optional: a Linear personal API key for the TODO column and for issue titles on cards
+- Optional: [linear-cli](https://github.com/nesszer/linear-cli), logged in, for the TODO column and for issue titles on cards (a Linear API key works too)
 
 macOS and Linux are supported. On Linux, copying a nudge needs `wl-copy`, `xclip` or `xsel`.
 
@@ -42,26 +42,31 @@ repos_dir = "~/code"          # its direct children are the repos the board read
 default_repo = "api"          # preselected when `a` on a TODO card asks for a repo
 
 [linear]
+cli = "linear-cli"            # send Linear queries through linear-cli's login
 ticket_prefixes = ["ENG"]     # default: every team key in your Linear workspace
 
 [commands]
 review = "bash ~/bin/review-pr.sh"   # `v`, called as: review-pr.sh <owner/repo> <number>
 ```
 
-**Linear.** The key comes from `$LINEAR_API_KEY`, else from the output of `linear.key_command`. On macOS, the default command reads the keychain item with service `linear-api`:
+**Linear.** The preferred setup is [linear-cli](https://github.com/nesszer/linear-cli): log in once, then point Desk at it. Desk sends its queries through linear-cli, so no key is stored for Desk.
 
 ```sh
-security add-generic-password -s linear-api -a "$USER" -w <key>
+linear-cli auth oauth    # or `linear-cli auth login` with an API key
 ```
-
-Or let [linear-cli](https://github.com/nesszer/linear-cli) send the queries with its own login (API key, OAuth or keyring), and no key is needed here:
 
 ```toml
 [linear]
 cli = "linear-cli"
 ```
 
-The workspace slug and the team keys come from Linear, so the key is all you need. A ticket ID such as `ENG-142` in a branch name or PR title links the card to its issue. Without a key, the board works with no TODO column and no issue links.
+Without `linear.cli`, Desk calls the API with a personal API key from `$LINEAR_API_KEY`, else from the output of `linear.key_command`. On macOS, the default command reads the keychain item with service `linear-api`:
+
+```sh
+security add-generic-password -s linear-api -a "$USER" -w <key>
+```
+
+The workspace slug and the team keys come from Linear, so the login is all you need. A ticket ID such as `ENG-142` in a branch name or PR title links the card to its issue. Without Linear, the board works with no TODO column and no issue links.
 
 **Hooks.** `v` (review a PR) and `T` (close stale sessions) run commands that you supply. When a hook is not configured, its key shows a message saying so. The tidy command runs with `--dry-run` first, and must print one `close <workspace>` line per workspace it closes.
 
