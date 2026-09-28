@@ -44,6 +44,11 @@ Column rules, first match wins:
               card shows, because that is how long a reviewer has had it.
   landed    — PR merged but a worktree or agent still exists: reaper territory.
 
+Each source refreshes on its own interval in a background thread (see the Source
+instances below): Herdr on every call, worktrees every 5s, git status every 30s,
+Linear every minute, GitHub every 2 minutes and not at all while its GraphQL budget
+is nearly spent. A call returns at once with the latest answer from each source.
+
 Output: board.json in the state directory (~/.local/state/desk), also printed to
 stdout with --print.
 """
@@ -54,7 +59,9 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
+import traceback
 
 import config
 from config import BOARD, STATE_DIR
@@ -110,6 +117,17 @@ def primaries():
             yield p, slugs
 
 
+def git_status(paths):
+    """{worktree path: (uncommitted files, unpushed commits)}, eight worktrees at a time:
+    one by one, a hundred worktrees take half a minute."""
+    def one(path):
+        dirty, _ = sh(["git", "status", "--porcelain"], path)
+        ahead, rc = sh(["git", "rev-list", "--count", "@{u}..HEAD"], path)
+        return path, (len(dirty.splitlines()), int(ahead) if rc == 0 and ahead.strip().isdigit() else 0)
+    with cf.ThreadPoolExecutor(8) as pool:
+        return dict(pool.map(one, paths))
+
+
 def worktrees(repo):
     out, _ = sh(["git", "worktree", "list", "--porcelain"], repo)
     for block in out.split("\n\n"):
@@ -128,8 +146,11 @@ OPEN_FIELDS = PR_FIELDS + """ reviewDecision mergeable mergeStateStatus
 # PRs others asked you to review: no review state or checks, since those decide nothing for you.
 REVIEW_FIELDS = PR_FIELDS + " author { login }"
 SEARCH_LIMIT = 100
-SEARCH = 'query($q: String!) { search(query: $q, type: ISSUE, first: %d) { issueCount nodes { ... on PullRequest { %%s } } } }' % SEARCH_LIMIT
+SEARCH = ('query($q: String!) { rateLimit { remaining resetAt } '
+          'search(query: $q, type: ISSUE, first: %d) { issueCount nodes { ... on PullRequest { %%s } } } }' % SEARCH_LIMIT)
 GITHUB_ERROR = f"{STATE_DIR}/github-error.txt"
+# GraphQL points left untouched for everything else on the account (5000 an hour in all).
+GITHUB_RESERVE = 1000
 
 
 def incomplete(response):
@@ -175,6 +196,9 @@ def search_prs(q, fields):
             lines = [l.strip() for l in (r.stderr or r.stdout).splitlines() if l.strip()]
             error = (lines[-1] if lines else f"gh exited {r.returncode}").removeprefix("gh: ")
             continue
+        limit = response["data"].get("rateLimit") or {}
+        if limit.get("remaining", GITHUB_RESERVE) < GITHUB_RESERVE:
+            GITHUB.hold = dt.datetime.fromisoformat(limit["resetAt"].replace("Z", "+00:00")).timestamp()
         error = incomplete(response)
         if not error:
             return nodes, ""
@@ -232,7 +256,7 @@ def iso_age_days(s):
     if not s:
         return None
     t = dt.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
-    return (now() - t) / 86400
+    return round((now() - t) / 86400, 2)
 
 
 LINEAR_QUERY = """
@@ -316,6 +340,62 @@ def linear_lookup(identifiers):
     } for n in nodes}
 
 
+_looked_up = {}
+
+
+def linear_lookup_once(identifiers):
+    """linear_lookup, asking Linear only about identifiers it has not been asked about yet."""
+    new = [i for i in identifiers if i not in _looked_up]
+    if new:
+        _looked_up.update(dict.fromkeys(new))
+        _looked_up.update(linear_lookup(new))
+    return {i: _looked_up[i] for i in identifiers if _looked_up.get(i)}
+
+
+class Source:
+    """One input to the board, refreshed on its own schedule. A read returns the last value at
+    once and, when that is `every` seconds old, refreshes it in a background thread, so a slow
+    source never holds up a fast one. No refresh starts before `hold`, a rate limit's reset."""
+
+    def __init__(self, fetch, every):
+        self.fetch, self.every = fetch, every
+        self.value, self.at, self.hold = None, 0.0, 0.0
+        self._thread, self._lock = None, threading.Lock()
+
+    def get(self, wait=False):
+        """The latest value, None before the first; `wait` blocks for the first instead."""
+        with self._lock:
+            if not (self._thread and self._thread.is_alive()) and now() >= max(self.at + self.every, self.hold):
+                self._thread = threading.Thread(target=self._refresh, daemon=True)
+                self._thread.start()
+        if wait and self.value is None and self._thread:
+            self._thread.join()
+        return self.value
+
+    def _refresh(self):
+        try:
+            self.value = self.fetch()
+        except Exception:
+            # Not to stderr: under the board that is the screen. The last value stays.
+            with open(f"{STATE_DIR}/collect-error.txt", "w") as f:
+                traceback.print_exc(file=f)
+        finally:
+            self.at = now()
+
+
+REPOS = Source(lambda: [(p, slugs, list(worktrees(p))) for p, slugs in primaries()], 5)
+STATUS = Source(lambda: git_status([path for _, _, wts in REPOS.value for path, _ in wts]), 30)
+GITHUB = Source(all_prs, 120)
+LINEAR = Source(linear_issues, 60)
+
+
+def refresh():
+    """Make every source due now (`r` on the board); a rate-limit hold still applies."""
+    for s in (REPOS, STATUS, GITHUB, LINEAR):
+        s.at = 0
+    _looked_up.clear()
+
+
 def place(c):
     """(column, reason) for one card, by the rules in the module docstring; column is None for
     a card that is not shown, and reason is set only for your_move."""
@@ -395,21 +475,28 @@ def herdr_agents(state):
     return agents
 
 
-def collect():
+def collect(wait=False):
+    """The board, or None while a source has yet to answer; `wait` blocks until all have."""
     os.makedirs(STATE_DIR, exist_ok=True)
+    repos = REPOS.get(wait)
+    # git status runs over the worktrees REPOS found, so it waits for them.
+    status = STATUS.get(wait) if repos is not None else None
+    fetched = GITHUB.get(wait), LINEAR.get(wait)
+    if None in (repos, status, *fetched):
+        return None
+    (prs_by_slug, review_prs, github_error), (issues, teams, workspace) = fetched
+
     state = load_state()
     agents = herdr_agents(state)
     json.dump(state, open(STATE, "w"))
 
     # Linear first: its team keys decide which strings on branches and PR titles are tickets.
-    issues, teams, workspace = linear_issues()
     pattern = ticket_pattern(config.TICKET_PREFIXES or teams)
 
     def ticket(text):
         m = pattern.search(text or "") if pattern else None
         return m[1] if m else None
 
-    repos = list(primaries())
     cards = {}
 
     def card(repo_name, branch):
@@ -418,15 +505,12 @@ def collect():
             "ticket": ticket(branch),
         })
 
-    for p, _ in repos:
+    for p, _, wts in repos:
         name = os.path.basename(p)
-        for path, branch in worktrees(p):
+        for path, branch in wts:
             c = card(name, branch or f"detached@{os.path.basename(path)}")
             c["path"] = path
-            dirty, _ = sh(["git", "status", "--porcelain"], path)
-            ahead, rc = sh(["git", "rev-list", "--count", "@{u}..HEAD"], path)
-            c["dirty"] = len(dirty.splitlines()) if dirty else 0
-            c["unpushed"] = int(ahead) if rc == 0 and ahead.isdigit() else 0
+            c["dirty"], c["unpushed"] = status.get(path, (0, 0))
 
     previous_conflicts = {}
     try:
@@ -436,7 +520,6 @@ def collect():
                     previous_conflicts[(c["repo"], c["branch"])] = c["pr"].get("conflicts")
     except Exception:
         pass
-    prs_by_slug, review_prs, github_error = all_prs()
     if github_error:
         # GitHub refused or answered short (a 504, a network timeout, the rate limit, a partial
         # result). Reuse the PRs from the last board so cards do not vanish; the PRs that did
@@ -452,7 +535,7 @@ def collect():
         except Exception:
             pass
     if True:
-        for p, slugs in repos:
+        for p, slugs, _ in repos:
             name = os.path.basename(p)
             for pr in [pr for sl in dict.fromkeys(x.lower() for x in slugs) for pr in prs_by_slug.get(sl, [])]:
                 c = card(name, pr["headRefName"])
@@ -476,7 +559,7 @@ def collect():
 
     # A review request is its own card: the branch is someone else's, so it never joins a
     # worktree or session of yours, and the repo needs no clone for the review command.
-    local = {sl.lower(): os.path.basename(p) for p, slugs in repos for sl in slugs}
+    local = {sl.lower(): os.path.basename(p) for p, slugs, _ in repos for sl in slugs}
     for pr in review_prs:
         slug = pr["repository"]["nameWithOwner"]
         cards[("review", pr["url"])] = {
@@ -500,7 +583,7 @@ def collect():
             cards.setdefault(home, {"repo": home[0], "branch": "", "path": a["cwd"], "pr": None, "agents": [], "workspace_id": None, "ticket": None})
         c = cards[home]
         c["agents"].append({
-            "kind": a["agent"], "status": a["agent_status"], "since_days": (now() - a["since"]) / 86400,
+            "kind": a["agent"], "status": a["agent_status"], "since_days": round((now() - a["since"]) / 86400, 2),
             "pane_id": a["pane_id"], "workspace_id": a["workspace_id"], "title": a.get("terminal_title_stripped", ""),
             "session": a["session"],
         })
@@ -513,7 +596,7 @@ def collect():
         if k in issues:
             c["issue"] = issues[k]; c["ticket"] = issues[k]["id"]; claimed.add(k)
     missing = {(c["ticket"] or "").upper() for c in cards.values() if c.get("ticket") and not c.get("issue")}
-    for k, i in linear_lookup(sorted(missing)).items():
+    for k, i in linear_lookup_once(sorted(missing)).items():
         for c in cards.values():
             if (c.get("ticket") or "").upper() == k:
                 c["issue"] = i; c["ticket"] = i["id"]
@@ -556,13 +639,14 @@ def collect():
         c["stale_draft"] = bool(pr and pr["draft"] and not pr["merged"] and (pr["created_days"] or 0) > 7 and c.get("reason", "").startswith("draft"))
     board = {"generated": now(), "columns": columns, "linear": bool(issues),
              "linear_workspace": config.LINEAR_WORKSPACE or workspace, "github_ok": not github_error, "github_error": github_error,
+             "github_at": GITHUB.at, "github_hold": GITHUB.hold if GITHUB.hold > now() else 0,
              "counts": {k: len(v) for k, v in columns.items()}, "agents": len(agents)}
     json.dump(board, open(BOARD, "w"))
     return board
 
 
 if __name__ == "__main__":
-    b = collect()
+    b = collect(wait=True)
     if "--print" in sys.argv:
         print(json.dumps(b, indent=1))
     else:

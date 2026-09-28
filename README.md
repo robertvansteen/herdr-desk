@@ -92,7 +92,17 @@ Press `?` on the board for the full list. The main keys:
 
 ## How it works
 
-`collect.py` joins the sources on `(repo, branch)` and writes `~/.local/state/desk/board.json`. `desk.py` is the Textual UI. It reads that file and runs the collector again every 5 minutes, or when you press `r`. The UI never changes state itself. Every action calls `herdr`, `gh`, `wt` or a configured hook.
+`collect.py` joins the sources on `(repo, branch)` and writes `~/.local/state/desk/board.json`. `desk.py` is the Textual UI. It asks the collector for a fresh board every second, and redraws only when a card changed. Each source refreshes on its own schedule in the background:
+
+| Source | Refreshed |
+|---|---|
+| Herdr agents | every second |
+| git worktrees | every 5 seconds |
+| `git status` in each worktree | every 30 seconds |
+| Linear | every minute |
+| GitHub | every 2 minutes, paused until the reset while fewer than 1000 GraphQL points are left |
+
+`r` makes every source refresh now. The UI never changes state itself. Every action calls `herdr`, `gh`, `wt` or a configured hook.
 
 Herdr does not record when an agent's status changed, so the collector records it in `state.json`. Ages such as "idle 3d" come from that file.
 

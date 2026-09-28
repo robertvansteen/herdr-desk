@@ -1,5 +1,7 @@
-"""Column rules of collect.place. Run: python3 test_collect.py"""
-from collect import incomplete, place
+"""Column rules of collect.place, partial search results and Source refresh timing. Run: python3 test_collect.py"""
+import time
+
+from collect import Source, incomplete, place
 
 
 def card(pr=None, agents=(), **extra):
@@ -49,4 +51,15 @@ assert incomplete(search([{}] * 100, 140)) == ""   # past the page size: a limit
 assert incomplete(search([{}], 3)) == "partial result: 1 of 3 PRs"
 assert incomplete(search([{}, None], 2)) == "partial result: 1 PR(s) did not resolve"
 assert incomplete(search([{}], 1, [{"message": "timeout"}])) == "partial result: timeout"
+
+calls = []
+s = Source(lambda: calls.append(1) or len(calls), every=3600)
+assert s.get(wait=True) == 1
+assert s.get(wait=True) == 1 and len(calls) == 1          # fresh: no second fetch
+s.at = 0
+s.get(); s._thread.join()
+assert s.get() == 2                                       # due: refreshed in the background
+s.at, s.hold = 0, time.time() + 60
+s.get(); s._thread.join()
+assert len(calls) == 2                                    # held for a rate limit: no fetch
 print("ok")

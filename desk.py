@@ -4,8 +4,8 @@
 Columns left to right: TODO, YOUR MOVE, WORKING, WAITING ON OTHERS, MERGEABLE, LANDED → REAP.
 Left/right moves between columns, up/down between cards. Actions act on the
 focused card and shell out to `herdr`, `gh`, `wt` and the configured hooks; the board never
-mutates state itself. Data refreshes in a background thread every 60s or on `r`,
-so gh latency never blocks the UI.
+mutates state itself. The board polls collect.py every second from a background thread;
+each source behind it refreshes on its own interval, so gh latency never blocks the UI.
 """
 import json
 import re
@@ -24,10 +24,10 @@ from textual.markup import escape
 from textual.screen import ModalScreen
 from textual.widgets import Footer, Header, Input, Static
 
+import collect
 import config
 from config import BOARD, STATE_DIR
 
-HERE = os.path.dirname(os.path.abspath(__file__))
 os.environ["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + os.environ.get("PATH", "")
 COLUMNS = [("todo", "TODO", "$magenta"), ("your_move", "YOUR MOVE", "$red"), ("working", "WORKING", "$green"),
            ("waiting", "WAITING ON OTHERS", "$yellow"), ("mergeable", "MERGEABLE", "$cyan"),
@@ -86,6 +86,14 @@ def fill(template, default, fields):
         return template.format(**fields)
     except (KeyError, IndexError, ValueError):
         return default.format(**fields)
+
+
+AGE = re.compile(r'"(?:since|updated|created)_days": [^,}]+')
+
+
+def without_ages(columns):
+    """The columns as text with every age left out: ages move on nearly every poll."""
+    return AGE.sub("", json.dumps(columns))
 
 
 def fit(text, width):
@@ -341,6 +349,8 @@ class Desk(App):
         yield Footer()
 
     board = None
+    board_key = ""
+    filled_at = 0.0
     needle = ""
     show_drafts = False
     dark = False
@@ -384,8 +394,8 @@ class Desk(App):
         # Ask to be told the terminal's dark/light scheme now and whenever it changes (mode 2031).
         self._driver.write("\x1b[?2031h\x1b[?996n")
         self.load(from_disk=True)
-        # 5 minutes: GitHub's GraphQL budget is shared with every other tool and agent on this account.
-        self.set_interval(300, self.load)
+        # Cheap: slow and rate-limited sources refresh on their own schedule inside collect.
+        self.set_interval(1, self.load)
         self.set_interval(1, self._tick)
 
     def on_unmount(self):
@@ -393,27 +403,39 @@ class Desk(App):
 
     @work(thread=True, exclusive=True)
     def load(self, from_disk=False):
-        if not from_disk or not os.path.exists(BOARD):
-            subprocess.run([sys.executable, f"{HERE}/collect.py"], capture_output=True)
-        try:
-            board = json.load(open(BOARD))
-        except Exception:
-            return
-        self.call_from_thread(self.render_board, board)
+        if from_disk:
+            try:
+                board = json.load(open(BOARD))
+            except Exception:
+                return
+        else:
+            board = collect.collect()
+        if board:
+            self.call_from_thread(self.render_board, board)
 
     def render_board(self, board=None):
         board = board or self.board
         if not board:
             return
-        self.board = board
+        # A refill remounts every card, so a poll skips it unless a card changed. A change in
+        # ages alone waits up to five minutes: with a few dozen cards one moves every few seconds.
+        key = without_ages(board["columns"])
+        refill = (board is self.board or key != self.board_key
+                  or board["columns"] != self.board["columns"] and time.time() - self.filled_at > 300)
+        self.board, self.board_key = board, key
+        import time as _t
+        self.sub_title = (f"{board['agents']} agents · {sum(board['counts'].values())} cards · PRs {_t.strftime('%H:%M', _t.localtime(board.get('github_at') or board['generated']))}"
+                          + ("" if board.get("linear") else " · Linear: no key")
+                          + (f" · GitHub paused for its rate limit until {_t.strftime('%H:%M', _t.localtime(board['github_hold']))}"
+                             if board.get("github_hold") else "")
+                          + ("" if board.get("github_ok", True) else
+                             f" · ⚠ GitHub unavailable ({fit(board.get('github_error') or 'unknown error', 60)}), PR data stale"))
+        if not refill:
+            return
+        self.filled_at = time.time()
         focused = self.focused.data["path"] if isinstance(self.focused, Card) else None
         for col in self.query(Column):
             col.fill(board["columns"].get(col.key, []), self.needle, self.show_drafts)
-        import time as _t
-        self.sub_title = (f"{board['agents']} agents · {sum(board['counts'].values())} cards · data {_t.strftime('%H:%M', _t.localtime(board['generated']))}"
-                          + ("" if board.get("linear") else " · Linear: no key")
-                          + ("" if board.get("github_ok", True) else
-                             f" · ⚠ GitHub unavailable ({fit(board.get('github_error') or 'unknown error', 60)}), PR data stale"))
         # Refocus a card only when a card had focus. While the filter box is being typed
         # into, it keeps focus: moving it to a card mid-word would hand the remaining
         # keystrokes to the board, where letters such as l, c, x and v are actions.
@@ -827,6 +849,7 @@ class Desk(App):
 
     def action_refresh(self):
         self.notify("refreshing…")
+        collect.refresh()
         self.load()
 
 
