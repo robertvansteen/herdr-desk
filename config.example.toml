@@ -14,6 +14,10 @@ default_repo = ""
 # Elsewhere there is no default; for example: key_command = "pass show linear/api-key"
 # key_command = "security find-generic-password -s linear-api -w"
 
+# Send Linear queries through linear-cli (github.com/nesszer/linear-cli) instead, which
+# uses its own login (API key, OAuth or keyring); the key settings above are then unused.
+# cli = "linear-cli"
+
 # Workspace slug in issue URLs (linear.app/<workspace>/issue/...). Read from
 # Linear when empty.
 workspace = ""

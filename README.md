@@ -54,6 +54,13 @@ review = "bash ~/bin/review-pr.sh"   # `v`, called as: review-pr.sh <owner/repo>
 security add-generic-password -s linear-api -a "$USER" -w <key>
 ```
 
+Or let [linear-cli](https://github.com/nesszer/linear-cli) send the queries with its own login (API key, OAuth or keyring), and no key is needed here:
+
+```toml
+[linear]
+cli = "linear-cli"
+```
+
 The workspace slug and the team keys come from Linear, so the key is all you need. A ticket ID such as `ENG-142` in a branch name or PR title links the card to its issue. Without a key, the board works with no TODO column and no issue links.
 
 **Hooks.** `v` (review a PR) and `T` (close stale sessions) run commands that you supply. When a hook is not configured, its key shows a message saying so. The tidy command runs with `--dry-run` first, and must print one `close <workspace>` line per workspace it closes.

@@ -199,6 +199,24 @@ query { organization { urlKey } teams(first: 250) { nodes { key } }
 """
 
 
+def linear_graphql(query, variables=None):
+    """(stdout, returncode) of one Linear GraphQL call, or None when Linear is not configured.
+
+    Through `linear.cli` when set (nesszer/linear-cli, which holds the credentials,
+    OAuth included), else straight to the API with the key. Both print the API's
+    own {"data": ...} response.
+    """
+    if config.LINEAR_CLI:
+        var_args = [a for k, v in (variables or {}).items() for a in ("-v", f"{k}={json.dumps(v)}")]
+        return sh([*config.LINEAR_CLI, "api", "query", "-o", "json", "-q", query, *var_args], timeout=30)
+    key = config.linear_key()
+    if not key:
+        return None
+    body = {"query": query, **({"variables": variables} if variables else {})}
+    return sh(["curl", "-sS", "--max-time", "20", "https://api.linear.app/graphql", "-H", "Content-Type: application/json",
+               "-H", f"Authorization: {key}", "-d", json.dumps(body)], timeout=30)
+
+
 def linear_issues():
     """(issues, team_keys, workspace) from one Linear call.
 
@@ -206,19 +224,17 @@ def linear_issues():
     and workspace (the URL slug) are what identifiers and issue links are built from.
     All empty without a key or on error.
     """
-    key = config.linear_key()
-    if not key:
+    r = linear_graphql(LINEAR_QUERY)
+    if r is None:
         return {}, [], ""
-    body = json.dumps({"query": LINEAR_QUERY})
-    out, rc = sh(["curl", "-sS", "--max-time", "20", "https://api.linear.app/graphql", "-H", "Content-Type: application/json",
-                  "-H", f"Authorization: {key}", "-d", body], timeout=30)
+    out, rc = r
     try:
         data = json.loads(out)["data"]
         nodes = data["viewer"]["assignedIssues"]["nodes"]
     except Exception:
         # The response (never the key) is kept for diagnosis; Linear's errors are explicit.
         with open(f"{STATE_DIR}/linear-error.txt", "w") as f:
-            f.write(f"curl rc={rc}\n{out[:2000]}\n")
+            f.write(f"rc={rc}\n{out[:2000]}\n")
         return {}, [], ""
     teams = [t["key"] for t in (data.get("teams") or {}).get("nodes", []) if t.get("key")]
     workspace = (data.get("organization") or {}).get("urlKey") or ""
@@ -232,8 +248,7 @@ def linear_issues():
 def linear_lookup(identifiers):
     """Fetch specific issues by identifier (any state, any assignee), for tickets named on
     branches that are not in the user's open assigned set: usually Done or someone else's."""
-    key = config.linear_key()
-    if not key or not identifiers:
+    if not identifiers:
         return {}
     clauses = []
     for ident in identifiers:
@@ -242,8 +257,10 @@ def linear_lookup(identifiers):
             clauses.append({"and": [{"team": {"key": {"eq": team}}}, {"number": {"eq": int(num)}}]})
     q = """query($f: IssueFilter) { issues(first: 50, filter: $f) {
       nodes { identifier title url branchName priority state { name type } project { name } } } }"""
-    out, rc = sh(["curl", "-sS", "--max-time", "20", "https://api.linear.app/graphql", "-H", "Content-Type: application/json",
-                  "-H", f"Authorization: {key}", "-d", json.dumps({"query": q, "variables": {"f": {"or": clauses}}})], timeout=30)
+    r = linear_graphql(q, {"f": {"or": clauses}})
+    if r is None:
+        return {}
+    out, _ = r
     try:
         nodes = json.loads(out)["data"]["issues"]["nodes"]
     except Exception:

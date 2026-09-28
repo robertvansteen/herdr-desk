@@ -58,6 +58,8 @@ REPOS_DIR = os.path.expanduser(_raw.get("repos_dir", "~/Developer"))
 DEFAULT_REPO = _raw.get("default_repo", "")
 
 LINEAR_WORKSPACE = _linear.get("workspace", "")
+# nesszer/linear-cli to send Linear queries through; its own login replaces the key.
+LINEAR_CLI = _command(_linear.get("cli"))
 TICKET_PREFIXES = [p.upper() for p in _linear.get("ticket_prefixes", [])]
 # The key never goes in the file: it comes from the environment or from a command that prints it.
 LINEAR_KEY_COMMAND = _command(_linear.get("key_command")) or (
