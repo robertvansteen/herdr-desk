@@ -7,6 +7,7 @@ focused card and shell out to `herdr`, `gh`, `wt` and the configured hooks; the 
 mutates state itself. Data refreshes in a background thread every 60s or on `r`,
 so gh latency never blocks the UI.
 """
+import glob
 import json
 import re
 import os
@@ -56,6 +57,17 @@ def ticket_url(card, board):
     if card.get("ticket") and workspace:
         return f"https://linear.app/{workspace}/issue/{card['ticket'].upper()}"
     return None
+
+
+def has_claude_history(path):
+    """Whether Claude Code saved a conversation for this directory; `claude --continue` exits without one.
+
+    Claude keeps a directory's transcripts under projects/<the path with every non-alphanumeric as ->.
+    """
+    if config.AGENT_KIND != "claude":
+        return False
+    root = os.environ.get("CLAUDE_CONFIG_DIR") or f"{config.HOME}/.claude"
+    return bool(glob.glob(f"{root}/projects/{re.sub(r'[^A-Za-z0-9]', '-', path)}/*.jsonl"))
 
 
 def fit(text, width):
@@ -400,8 +412,11 @@ class Desk(App):
         c = self.card()
         if c and c.get("workspace_id"):
             sh("herdr", "workspace", "focus", c["workspace_id"])
+        elif c and c.get("path") and c.get("branch"):
+            self.notify(f"reopening {os.path.basename(c['path'])} …", timeout=20)
+            self._launch(dict(c), resume=True)
         elif c:
-            self.notify("no open workspace — press a to launch one", severity="warning")
+            self.notify("no worktree here — press a to launch one", severity="warning")
 
     def action_open_url(self, url):
         webbrowser.open(url)
@@ -481,15 +496,20 @@ class Desk(App):
         self._launch(dict(c))
 
     @work(thread=True, group="launch")
-    def _launch(self, c):
+    def _launch(self, c, resume=False):
+        """Open the card's worktree in Herdr and start an agent there. With `resume`, the
+        worktree already exists and the agent continues its last conversation when it has one."""
         notify = lambda *a, **k: self.call_from_thread(self.notify, *a, **k)
         repo_root = os.path.join(config.REPOS_DIR, c["repo"])
-        args = ["wt", "-C", repo_root, "switch", "--no-cd", "-y", "--format=json"] + (["-c"] if c.get("create") else []) + [c["branch"]]
-        r = sh(*args)
-        try:
-            path = json.loads(r.stdout).get("path") or c["path"]
-        except Exception:
+        if resume:
             path = c["path"]
+        else:
+            args = ["wt", "-C", repo_root, "switch", "--no-cd", "-y", "--format=json"] + (["-c"] if c.get("create") else []) + [c["branch"]]
+            r = sh(*args)
+            try:
+                path = json.loads(r.stdout).get("path") or c["path"]
+            except Exception:
+                path = c["path"]
         if not path:
             notify("wt switch failed", severity="error"); return
         issue = c.get("issue")
@@ -503,8 +523,9 @@ class Desk(App):
         name = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in (issue["id"] if issue else c["branch"]).lower()).strip("-")[:28]
         if not name[:1].isalpha():
             name = "t-" + name
-        sh("herdr", "agent", "start", name, "--kind", config.AGENT_KIND, "--pane", pane)
-        if issue:
+        continuing = resume and has_claude_history(path)
+        sh("herdr", "agent", "start", name, "--kind", config.AGENT_KIND, "--pane", pane, *(["--", "--continue"] if continuing else []))
+        if issue and not continuing:
             notify(f"{issue['id']} worktree ready; the agent gets the issue once it is past the trust prompt", timeout=12)
             self._brief(name, issue, c["branch"])
         self.load()
@@ -800,7 +821,7 @@ class Help(ModalScreen):
         ("r", "refresh now"),
         ("T", "close stale sessions with the configured tidy command (asks first)"),
         ("Act", None),
-        ("Enter", "focus the card's Herdr workspace"),
+        ("Enter", "focus the card's Herdr workspace · reopen a closed one, resuming its session"),
         ("o", "open the PR, or the Linear issue if there is no PR"),
         ("i", "open the Linear issue"),
         ("n", "copy a Slack nudge for this PR's reviewer"),

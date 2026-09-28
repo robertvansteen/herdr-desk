@@ -65,7 +65,7 @@ Press `?` on the board for the full list. The main keys:
 | Key | Action |
 |---|---|
 | `h` `j` `k` `l` or arrows | move between columns and cards |
-| `Enter` | focus the card's Herdr workspace |
+| `Enter` | focus the card's Herdr workspace; for a worktree with no open workspace, open one and resume its last Claude conversation |
 | `o` / `i` | open the PR / the Linear issue |
 | `a` | start an agent in the card's worktree (on a TODO card, create the worktree first) |
 | `n` | copy a short review request for the PR |
