@@ -40,7 +40,9 @@ Column rules, first match wins:
               nobody can merge a draft, so they block no one yet.
   working   — any agent in `working`.
   mergeable — PR approved and GitHub says it can merge now (mergeStateStatus CLEAN).
-  waiting   — PR open, review outstanding. Age since the last push is what the
+  waiting   — PR open and a reviewer's to act on: a review is requested, or every review
+              predates your last push. An open PR nobody was asked to review, or one
+              reviewed with comments on its current head, is your_move. Age since the last push is what the
               card shows, because that is how long a reviewer has had it.
   landed    — PR merged but a worktree or agent still exists: reaper territory.
 
@@ -122,8 +124,11 @@ PR_FIELDS = """number title url headRefName baseRefName isDraft updatedAt create
   repository { nameWithOwner }"""
 # Review state, mergeability and checks are what makes the search slow enough for GitHub to
 # answer 504, so only open PRs, where they decide the column, ask for them.
-OPEN_FIELDS = PR_FIELDS + """ reviewDecision mergeable mergeStateStatus
+# latestReviews carries the commit each review saw: a review of an older head is one the
+# reviewer has to repeat, not one you have to answer.
+OPEN_FIELDS = PR_FIELDS + """ reviewDecision mergeable mergeStateStatus headRefOid author { login }
   reviewRequests(first: 10) { nodes { requestedReviewer { ... on User { login } ... on Team { name } } } }
+  latestReviews(first: 20) { nodes { state author { login __typename } commit { oid } } }
   commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }"""
 # PRs others asked you to review: no review state or checks, since those decide nothing for you.
 REVIEW_FIELDS = PR_FIELDS + " author { login }"
@@ -316,6 +321,25 @@ def linear_lookup(identifiers):
     } for n in nodes}
 
 
+def awaiting_you(pr):
+    """The reason an open PR with no pending review request is yours, or None when it is not.
+
+    GitHub drops a request once the reviewer submits, so an empty request list means one of
+    three things: nobody was ever asked (yours: ask someone), someone reviewed the current
+    head with comments (yours: answer them), or every review predates your last push (theirs:
+    the reviewer looks again, so it stays in waiting).
+    """
+    reviews = pr.get("reviews")
+    if reviews is None:
+        return None  # a snapshot from before reviews were collected: no evidence either way
+    if not reviews:
+        return "no reviewer requested"
+    current = sorted({r["by"] for r in reviews if r["current"]})
+    if current:
+        return f"reviewed by {', '.join(current)}: reply to comments"
+    return None
+
+
 def place(c):
     """(column, reason) for one card, by the rules in the module docstring; column is None for
     a card that is not shown, and reason is set only for your_move."""
@@ -338,6 +362,8 @@ def place(c):
         reason = "agent needs you"
     elif "done" in statuses:
         reason = "agent finished"
+    elif ready and not pr.get("reviewers") and pr["review"] != "APPROVED" and (answered := awaiting_you(pr)):
+        reason = answered
     elif pr and not pr["merged"] and pr["draft"] and (pr["created_days"] or 0) > 1:
         # The suffixes avoid the URGENCY keys, so the card ranks as a draft.
         reason = " · ".join(["draft > 1d"] + (["conflicts"] if pr.get("conflicts") else [])
@@ -460,6 +486,13 @@ def collect():
                     "number": pr["number"], "title": pr["title"], "url": pr["url"], "draft": pr["isDraft"],
                     "base": pr.get("baseRefName") or "", "review": pr.get("reviewDecision") or "", "checks": checks(pr),
                     "reviewers": [r.get("login") or r.get("name") for r in pr.get("reviewRequests") or []],
+                    # People's reviews only: a bot's review asks nothing of you, and your own
+                    # comments on your PR are not a review.
+                    "reviews": [{"by": r["author"]["login"], "state": r["state"],
+                                 "current": (r.get("commit") or {}).get("oid") == pr.get("headRefOid")}
+                                for r in (pr.get("latestReviews") or {}).get("nodes", [])
+                                if r.get("author") and r["author"].get("__typename") != "Bot"
+                                and r["author"]["login"] != (pr.get("author") or {}).get("login")],
                     "updated_days": iso_age_days(pr.get("updatedAt")), "created_days": iso_age_days(pr.get("createdAt")),
                     "merged": bool(pr.get("mergedAt")), "size": f'+{pr.get("additions",0)} -{pr.get("deletions",0)}',
                     # GitHub computes mergeability lazily: UNKNOWN means "not yet", not "clean",
@@ -533,7 +566,7 @@ def collect():
             columns[key].append(c)
         # else: bare worktree with nothing attached, not shown
 
-    URGENCY = ["changes requested", "checks failing", "merge conflicts", "agent needs you", "review requested", "uncommitted", "agent finished", "in linear", "waiting for prompt", "draft"]
+    URGENCY = ["changes requested", "checks failing", "merge conflicts", "agent needs you", "review requested", "uncommitted", "agent finished", "in linear", "waiting for prompt", "reply to comments", "no reviewer", "draft"]
 
     def urgency(c):
         """Approved PRs first: one rebase or one CI fix from merging, they are the cheapest

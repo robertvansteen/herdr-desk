@@ -5,9 +5,9 @@ A [Herdr](https://herdr.dev) plugin that shows your agent sessions, git worktree
 | Column | A card is here when |
 |---|---|
 | TODO | a Linear issue is assigned to you, in a Todo state, and nothing local exists for it |
-| YOUR MOVE | someone asked you to review their PR (by name; teams too with `github.team_review_requests`), changes requested, CI red, merge conflicts, an agent is blocked or finished, a draft is older than a day, or an agent is idle without a PR, waiting for its next prompt |
+| YOUR MOVE | someone asked you to review their PR (by name; teams too with `github.team_review_requests`), changes requested, CI red, merge conflicts, an agent is blocked or finished, a draft is older than a day, or an agent is idle without a PR, waiting for its next prompt, or a ready PR has no reviewer requested or has review comments on its current commit |
 | WORKING | an agent is running |
-| WAITING ON OTHERS | a PR is open and waits for review |
+| WAITING ON OTHERS | a PR is open and a reviewer has to act: one is requested, or every review predates your last push |
 | MERGEABLE | a PR is approved and GitHub says it can merge now |
 | LANDED → REAP | the PR merged but its worktree or session still exists |
 

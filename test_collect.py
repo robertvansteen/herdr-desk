@@ -34,6 +34,15 @@ assert place(card(pr(draft=True, conflicts=True, created_days=3), [agent("blocke
 
 assert place(card(pr(author="alice"), path=None, review_request=True)) == ("your_move", "review requested by alice")
 
+review = lambda by="erik", current=True: {"by": by, "state": "COMMENTED", "current": current}
+assert place(card(pr(reviewers=[], reviews=[]))) == ("your_move", "no reviewer requested")
+assert place(card(pr(reviewers=[], reviews=[review(), review("juliana")]))) == ("your_move", "reviewed by erik, juliana: reply to comments")
+assert place(card(pr(reviewers=[], reviews=[review(current=False)]))) == ("waiting", None)
+assert place(card(pr(reviewers=["erik"], reviews=[]))) == ("waiting", None)
+assert place(card(pr(reviewers=[], reviews=[], review="APPROVED"))) == ("waiting", None)
+assert place(card(pr(reviewers=[], reviews=[], draft=True))) == ("waiting", None)
+assert place(card(pr(reviewers=[]))) == ("waiting", None)   # no reviews collected: no evidence
+
 assert place(card(pr(merged=True))) == ("landed", None)
 assert place(card(pr(merged=True), path=None)) == (None, None)
 assert place(card()) == (None, None)

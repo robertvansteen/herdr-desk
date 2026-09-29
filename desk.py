@@ -186,7 +186,7 @@ class Card(Static):
                 state = "[dim]draft[/dim]"; said.add("draft")
             else:
                 state = {"CHANGES_REQUESTED": "[$red]changes requested[/$red]", "APPROVED": "[$green]approved[/$green]",
-                         "REVIEW_REQUIRED": "[$yellow]review requested[/$yellow]"}.get(pr["review"], "open")
+                         "REVIEW_REQUIRED": "[$yellow]review required[/$yellow]"}.get(pr["review"], "open")
                 if pr["review"] == "CHANGES_REQUESTED": said.add("changes requested")
             chk = {"fail": "[$red]✗ CI[/$red]", "pass": "[$green]✓ CI[/$green]", "pending": "[$yellow]… CI[/$yellow]"}.get(pr["checks"], "")
             if pr["checks"] == "fail": said.add("checks failing")
@@ -972,7 +972,8 @@ class Help(ModalScreen):
         ("", "In Progress in Linear with nothing local · idle agent with no PR"),
         ("", "drafts older than a day, folded after a week"),
         ("WORKING", "an agent is running"),
-        ("WAITING ON OTHERS", "review outstanding · ⚠ after 2 days, red after 5"),
+        ("WAITING ON OTHERS", "a reviewer is asked, or has to look again after your push"),
+        ("", "⚠ after 2 days, red after 5 · nobody asked, or comments to answer: YOUR MOVE"),
         ("MERGEABLE", "approved and GitHub can merge it now"),
         ("LANDED → REAP", "PR merged, worktree or session still here"),
     ]
