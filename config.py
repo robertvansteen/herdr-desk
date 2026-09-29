@@ -20,6 +20,10 @@ STATE_DIR = os.path.join(os.environ.get("XDG_STATE_HOME") or f"{HOME}/.local/sta
 BOARD = f"{STATE_DIR}/board.json"
 PATH = os.environ.get("DESK_CONFIG") or os.path.join(os.environ.get("XDG_CONFIG_HOME") or f"{HOME}/.config", "desk", "config.toml")
 
+# `a` and `f` pick the brief from the card: new work on an issue with no PR yet gets
+# DEFAULT_BRIEF; a PR with something to act on gets the fix frame with one task per problem;
+# any other open PR gets DEFAULT_RESUME_BRIEF, which orients the agent and leaves the next
+# step to you.
 DEFAULT_BRIEF = (
     "Start work on Linear issue {id}: {title}\n{url}\n\n"
     "This worktree's branch, {branch}, is the one Linear generated for the issue, so a PR "
@@ -27,11 +31,12 @@ DEFAULT_BRIEF = (
     "else: it is the spec for this branch."
 )
 
-# The brief `f` sends to fix a PR: one frame around one task per problem, so a PR with both
-# conflicts and red CI reads as one job. Fields everywhere: {number} {url} {branch} {base};
+# The fix frame: one brief around one task per problem, so a PR with conflicts, red CI and
+# review comments reads as one job. Fields in the frame and every task: {number} {url}
+# {branch} {base} {repo} (owner/name) {reviewers} {issue} (a "Linear issue: …" line, or "");
 # the frame also gets {tasks}, the task texts, numbered when there is more than one.
 DEFAULT_FIX_BRIEF = (
-    "PR #{number} on branch {branch} needs fixing before it can merge: {url}\n\n"
+    "PR #{number} on branch {branch} needs work before it can merge: {url}{issue}\n\n"
     "{tasks}\n\n"
     "Then run the tests and push. Stop and ask when a fix needs a decision about behaviour "
     "rather than code."
@@ -44,6 +49,22 @@ DEFAULT_FIX_CHECKS = (
     "CI is failing. Find the failing checks with `gh pr checks {number}` and read their logs with "
     "`gh run view <run-id> --log-failed`. Fix the cause, not the symptom: change a test only when "
     "the test itself is wrong, and run the failing checks locally where you can."
+)
+DEFAULT_FIX_REVIEWS = (
+    "{reviewers} reviewed it and left comments. Read the review threads with `gh pr view "
+    "{number} --comments` and the line comments with `gh api repos/{repo}/pulls/{number}/comments`. "
+    "Make each change you agree with. Where you disagree, or a comment needs my call, draft a "
+    "reply instead and list the drafts for me when you are done. Do not post replies or "
+    "resolve threads."
+)
+# For an open PR with nothing to act on. {state} says where it stands, such as "waiting for
+# review by erik"; {issue} is as in the fix frame.
+DEFAULT_RESUME_BRIEF = (
+    "You are picking up PR #{number} on branch {branch}: {url}{issue}\n"
+    "It is {state}.\n\n"
+    "Read its description, its discussion and its diff against {base}, and the issue if it has "
+    "one, so you know where the work stands. Summarise that in a few lines, then wait for "
+    "instructions."
 )
 
 
@@ -93,6 +114,8 @@ BRIEF = _agent.get("brief", DEFAULT_BRIEF)
 FIX_BRIEF = _agent.get("fix_brief", DEFAULT_FIX_BRIEF)
 FIX_CONFLICTS = _agent.get("fix_conflicts", DEFAULT_FIX_CONFLICTS)
 FIX_CHECKS = _agent.get("fix_checks", DEFAULT_FIX_CHECKS)
+FIX_REVIEWS = _agent.get("fix_reviews", DEFAULT_FIX_REVIEWS)
+RESUME_BRIEF = _agent.get("resume_brief", DEFAULT_RESUME_BRIEF)
 
 # Optional hooks. Without one, its key on the board reports that it is not configured.
 REVIEW_COMMAND = _command(_commands.get("review"))

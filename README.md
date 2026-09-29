@@ -80,7 +80,7 @@ Press `?` on the board for the full list. The main keys:
 | `h` `j` `k` `l` or arrows | move between columns and cards |
 | `Enter` | focus the card's Herdr workspace |
 | `o` / `i` | open the PR / the Linear issue |
-| `a` | start an agent in the card's worktree (on a TODO card, create the worktree first) |
+| `a` | start an agent in the card's worktree, briefed by the card: new work on its issue, the PR's conflicts, red CI and review comments, or, with nothing to act on, where the PR stands (on a TODO card, create the worktree first) |
 | `f` | hand the PR's merge conflicts or red CI to the card's idle agent, or to a new one |
 | `n` | copy a short review request for the PR |
 | `x` / `X` | remove the worktree and close its session / force-remove a dirty one after confirmation |

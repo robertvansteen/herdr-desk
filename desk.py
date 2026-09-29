@@ -108,6 +108,52 @@ def fill(template, default, fields):
         return default.format(**fields)
 
 
+def pr_brief(card, fixes_only=False):
+    """(brief, what) for an agent on a card with an open PR of yours, or (None, why not).
+
+    The tasks are the PR's problems, in the order that saves work: conflicts first, since
+    resolving them changes the code CI runs; then red CI; then review comments on the
+    current commit, or changes requested. With none, the resume brief orients the agent
+    and asks for instructions; fixes_only (for `f`) refuses instead, and leaves reviews out,
+    since answering them is judgement rather than mechanics.
+    """
+    pr, issue = card.get("pr"), card.get("issue")
+    if not pr or pr.get("merged") or card.get("review_request"):
+        return None, "no open PR of yours on this card"
+    m = re.search(r"github\.com/([^/]+/[^/]+)/pull/", pr["url"])
+    reviewed = sorted({r["by"] for r in pr.get("reviews") or [] if r["current"]})
+    fields = {"number": pr["number"], "url": pr["url"], "branch": card["branch"], "base": pr.get("base") or "the base branch",
+              "repo": m.group(1) if m else "", "issue": f"\nLinear issue: {issue['id']}, {issue['title']} ({issue['url']})" if issue else "",
+              "reviewers": ", ".join(reviewed) or "Reviewers"}
+    tasks = []
+    if pr.get("conflicts"):
+        tasks.append(fill(config.FIX_CONFLICTS, config.DEFAULT_FIX_CONFLICTS, fields))
+    if pr.get("checks") == "fail":
+        tasks.append(fill(config.FIX_CHECKS, config.DEFAULT_FIX_CHECKS, fields))
+    if not fixes_only and (reviewed or pr.get("review") == "CHANGES_REQUESTED"):
+        tasks.append(fill(config.FIX_REVIEWS, config.DEFAULT_FIX_REVIEWS, fields))
+    if tasks:
+        what = "fix" if fixes_only or not (reviewed or pr.get("review") == "CHANGES_REQUESTED") else "work on"
+        if len(tasks) > 1:
+            tasks = [f"{i}. {t}" for i, t in enumerate(tasks, 1)]
+            if pr.get("conflicts"):
+                tasks.append("Resolve the conflicts first: everything after them runs on the merged code.")
+        return fill(config.FIX_BRIEF, config.DEFAULT_FIX_BRIEF, {**fields, "tasks": "\n\n".join(tasks)}), what
+    if fixes_only:
+        return None, "nothing mechanical to fix: no merge conflicts and CI is not red"
+    if pr["draft"]:
+        state = "a draft"
+    elif pr.get("review") == "APPROVED":
+        state = "approved"
+    elif pr.get("reviewers"):
+        state = f"waiting for review by {', '.join(pr['reviewers'])}"
+    elif pr.get("reviews"):
+        state = "reviewed before your last push, and waiting for those reviewers to look again"
+    else:
+        state = "open, with no reviewer requested yet"
+    return fill(config.RESUME_BRIEF, config.DEFAULT_RESUME_BRIEF, {**fields, "state": state}), "pick up"
+
+
 def fit(text, width):
     """One line, hard-truncated with an ellipsis; wrapping inside a narrow card destroys scanability."""
     text = text or ""
@@ -599,20 +645,14 @@ class Desk(App):
         """Hand a PR's merge conflicts or red CI to an agent: the card's idle agent when it has
         one, else a new one in the card's worktree. Both problems at once go in one brief."""
         c = self.card()
-        pr = (c or {}).get("pr")
-        if not pr or pr.get("merged"):
-            self.notify("no open PR on this card", severity="warning"); return
+        if not c:
+            return
         if c.get("review_request"):
             self.notify("someone else's PR: v reviews it", severity="warning"); return
-        fields = {"number": pr["number"], "url": pr["url"], "branch": c["branch"], "base": pr.get("base") or "the base branch"}
-        tasks = ([fill(config.FIX_CONFLICTS, config.DEFAULT_FIX_CONFLICTS, fields)] if pr.get("conflicts") else []) \
-            + ([fill(config.FIX_CHECKS, config.DEFAULT_FIX_CHECKS, fields)] if pr.get("checks") == "fail" else [])
-        if not tasks:
-            self.notify("nothing mechanical to fix: no merge conflicts and CI is not red", severity="warning"); return
-        if len(tasks) > 1:
-            # Conflicts go first: resolving them changes the code CI runs, and can turn it green.
-            tasks = [f"{i}. {t}" for i, t in enumerate(tasks, 1)] + ["Resolve the conflicts first: CI may pass once they are gone."]
-        text = fill(config.FIX_BRIEF, config.DEFAULT_FIX_BRIEF, {**fields, "tasks": "\n\n".join(tasks)})
+        text, why = pr_brief(c, fixes_only=True)
+        if not text:
+            self.notify(why, severity="warning"); return
+        pr = c["pr"]
         agents = c.get("agents", [])
         free = next((a for a in agents if a["status"] in ("idle", "done")), None)
         if free:
@@ -639,8 +679,11 @@ class Desk(App):
                     self.set_job(c2, f"creating {c['branch']} in {repo}")
                     self._launch(c2)
             self.push_screen(RepoPick(), chosen); return
-        self.set_job(c, f"launching {config.AGENT_KIND}")
-        self._launch(dict(c))
+        # A card with an open PR is follow-up work: the brief comes from the PR's state, not
+        # from the issue, which the new-work brief treats as the start of the branch.
+        brief, what = pr_brief(c) if c.get("pr") and not c["pr"].get("merged") else (None, None)
+        self.set_job(c, f"launching {config.AGENT_KIND}" + (f" to {what} #{c['pr']['number']}" if brief else ""))
+        self._launch(dict(c), brief=brief)
 
     @work(thread=True, group="launch")
     def _launch(self, c, brief=None):
@@ -710,7 +753,8 @@ class Desk(App):
                 time.sleep(0.5)
             else:
                 return failed(f"{config.AGENT_KIND} did not start: " + ((a.stdout or a.stderr).strip().splitlines() or ["no output"])[-1][:140])
-        if not brief and issue:
+        # The new-work brief is for a branch with no PR yet; a merged one needs no brief at all.
+        if not brief and issue and not c.get("pr"):
             fields = {"id": issue["id"], "title": issue["title"], "url": issue["url"], "branch": c["branch"]}
             brief = fill(config.BRIEF, config.DEFAULT_BRIEF, fields)
         if brief and not self._brief(c, label, name, brief):
@@ -1038,7 +1082,8 @@ class Help(ModalScreen):
         ("i", "open the Linear issue"),
         ("n", "copy a Slack nudge for this PR's reviewer"),
         ("v", "review this PR with the configured review command"),
-        ("a", "launch an agent here · on a TODO card: pick a repo, create the worktree"),
+        ("a", "launch an agent, briefed by the card: its issue, or its PR's state"),
+        ("", "on a TODO card: pick a repo, create the worktree"),
         ("f", "hand merge conflicts or red CI to the idle agent here, or a new one"),
         ("c", "close the session (the agent's resume brings it back)"),
         ("x", "remove the worktree, close its session (refuses when dirty)"),

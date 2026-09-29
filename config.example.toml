@@ -42,12 +42,18 @@ kind = "claude"
 # {url}
 # """
 
-# The brief `f` sends to fix a PR: fix_brief is the frame, and {tasks} in it
-# becomes fix_conflicts and/or fix_checks, numbered when both apply. Fields in
-# all three: {number} {url} {branch} {base}. See config.py for the defaults.
-# fix_brief = "PR #{number} on {branch}: {url}\n\n{tasks}\n\nThen run the tests and push."
+# Briefs for a card that already has a PR, which `a` and `f` choose by its state.
+# fix_brief is the frame, and {tasks} in it becomes fix_conflicts, fix_checks
+# and fix_reviews (review comments on the current commit, or changes requested),
+# numbered when more than one applies; `f` sends only the first two. An open PR
+# with none of these gets resume_brief, which orients the agent and asks for
+# instructions. Fields: {number} {url} {branch} {base} {repo} {reviewers}
+# {issue}, and {state} in resume_brief. See config.py for the defaults.
+# fix_brief = "PR #{number} on {branch}: {url}{issue}\n\n{tasks}\n\nThen run the tests and push."
 # fix_conflicts = "..."
 # fix_checks = "..."
+# fix_reviews = "..."
+# resume_brief = "..."
 
 [commands]
 # `v`: reviews a PR. Called with two arguments, <owner/repo> <number>.
