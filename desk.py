@@ -633,22 +633,38 @@ class Desk(App):
         self.job(c, "opening the workspace")
         o = sh("herdr", "worktree", "open", "--cwd", repo_root, "--path", path, "--label", label, "--no-focus", "--json")
         try:
-            pane = json.loads(o.stdout)["result"]["root_pane"]["pane_id"]
+            opened = json.loads(o.stdout)["result"]
+            pane = opened["root_pane"]["pane_id"]
         except Exception:
             return failed("herdr worktree open failed: " + ((o.stderr or o.stdout).strip().splitlines() or ["no output"])[-1][:140])
         name = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in (issue["id"] if issue else c["branch"]).lower()).strip("-")[:28]
         if not name[:1].isalpha():
             name = "t-" + name
         self.job(c, f"starting {config.AGENT_KIND}")
-        # A new pane refuses an agent (agent_pane_busy) until its shell is up, a few seconds
-        # after the workspace opens; one attempt straight away would leave it without one.
-        for _ in range(60):
-            a = sh("herdr", "agent", "start", name, "--kind", config.AGENT_KIND, "--pane", pane)
-            if a.returncode == 0:
-                break
-            time.sleep(0.5)
-        else:
-            return failed(f"{config.AGENT_KIND} did not start: " + ((a.stdout or a.stderr).strip().splitlines() or ["no output"])[-1][:140])
+        start = lambda p: sh("herdr", "agent", "start", name, "--kind", config.AGENT_KIND, "--pane", p)
+        a = None
+        if opened.get("already_open"):
+            # A live workspace's first pane can be anything, such as a review pane opened
+            # beside a session that has since closed. Its idle shells are tried once each,
+            # since they are up already; with none free the agent gets a pane of its own.
+            pane = None
+            for p in self._shell_panes(opened["root_pane"]["workspace_id"]):
+                if (a := start(p)).returncode == 0:
+                    pane = p
+                    break
+            if pane is None:
+                pane = self._split_for_agent(opened["root_pane"]["pane_id"], path)
+                if not pane:
+                    return failed("no free pane for the agent, and herdr pane split failed")
+        if a is None or a.returncode != 0:
+            # A new pane refuses an agent (agent_pane_busy) until its shell is up, a few
+            # seconds after it opens; one attempt straight away would leave it without one.
+            for _ in range(60):
+                if (a := start(pane)).returncode == 0:
+                    break
+                time.sleep(0.5)
+            else:
+                return failed(f"{config.AGENT_KIND} did not start: " + ((a.stdout or a.stderr).strip().splitlines() or ["no output"])[-1][:140])
         if not brief and issue:
             fields = {"id": issue["id"], "title": issue["title"], "url": issue["url"], "branch": c["branch"]}
             brief = fill(config.BRIEF, config.DEFAULT_BRIEF, fields)
@@ -658,6 +674,26 @@ class Desk(App):
         alert(f"{label} is ready", f"{config.AGENT_KIND} is " + ("working on its brief" if brief else "waiting in its workspace")
               + ". Enter on its Desk card goes there.")
         self.load()
+
+    def _shell_panes(self, ws):
+        """The panes in a workspace that hold no agent, in layout order."""
+        try:
+            panes = json.loads(sh("herdr", "pane", "list").stdout)["result"]["panes"]
+        except Exception:
+            return []
+        return [p["pane_id"] for p in panes if p["workspace_id"] == ws and not p.get("agent")]
+
+    def _split_for_agent(self, beside, cwd):
+        """A new pane for the agent, left of `beside` where the agent sits in a fresh
+        workspace; None when the split fails. Herdr splits only right or down, so the new
+        pane is swapped into place, best effort: a failed swap leaves it on the right."""
+        r = sh("herdr", "pane", "split", beside, "--direction", "right", "--cwd", cwd, "--no-focus")
+        try:
+            new = json.loads(r.stdout)["result"]["pane"]["pane_id"]
+        except Exception:
+            return None
+        sh("herdr", "pane", "swap", "--source-pane", new, "--target-pane", beside)
+        return new
 
     def _brief(self, c, label, name, text):
         """Hand a fresh session its first prompt; False when it never became ready for one.
