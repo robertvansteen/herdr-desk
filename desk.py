@@ -67,16 +67,36 @@ def elapsed(since):
     return f"{secs}s" if secs < 60 else f"{secs // 60}m"
 
 
+def card_id(card):
+    """A card's identity across refreshes, which rebuild every card and may move it to
+    another column: its repo, branch and worktree path."""
+    return (card.get("repo"), card.get("branch"), card.get("path"))
+
+
 def job_key(card):
     """What a job is filed under: the branch, which a TODO card shares with the worktree card
     that replaces it once `a` creates the worktree; the path for a card with no branch."""
     return card.get("branch") or card.get("path") or ""
 
 
+def on_board():
+    """Whether the Desk workspace has focus in Herdr; True when that cannot be told."""
+    ws = os.environ.get("HERDR_WORKSPACE_ID")
+    if not ws:
+        return True
+    try:
+        spaces = json.loads(sh("herdr", "workspace", "list").stdout)["result"]["workspaces"]
+    except Exception:
+        return True
+    return any(w["workspace_id"] == ws and w.get("focused") for w in spaces)
+
+
 def alert(title, body, sound="done"):
-    """A Herdr notification: shown over whatever workspace has focus, so a job that ends while
-    you are elsewhere still reaches you. `request` is the sound for something that needs you."""
-    sh("herdr", "notification", "show", title, "--body", body, "--sound", sound)
+    """A Herdr notification, for a job that ends while you are in another workspace. On the
+    board the card already says it, and a notification there only asks you to look twice.
+    `request` is the sound for something that needs you."""
+    if not on_board():
+        sh("herdr", "notification", "show", title, "--body", body, "--sound", sound)
 
 
 def fill(template, default, fields):
@@ -174,6 +194,8 @@ class Card(Static):
         if job:
             if job["state"] == "failed":
                 lines.append(f"[b $red]✗ {escape(fit(job['text'], w - 2))}[/b $red]")
+            elif job["state"] == "done":
+                lines.append(f"[b $green]✓ {escape(fit(job['text'], w - 2))}[/b $green]")
             else:
                 lines.append(f"[b $yellow]⟳ {escape(fit(job['text'], w - 8))} {elapsed(job['since'])}[/b $yellow]")
 
@@ -237,11 +259,15 @@ class Lane(VerticalScroll, inherit_bindings=False):
 
     VerticalScroll and HorizontalScroll bind the arrow keys to scrolling, and as ancestors of the
     focused card they would take the arrows before the app's navigation bindings see them.
+    Nor does it take focus: a scroll container is focusable by default, and when a refresh
+    removes the focused card, focus would fall to it and leave no card focused.
     """
+    can_focus = False
 
 
 class Board(HorizontalScroll, inherit_bindings=False):
     """The row of columns, scrolled sideways by focus and the mouse only; see Lane."""
+    can_focus = False
 
 
 class Column(Vertical):
@@ -357,7 +383,7 @@ class Desk(App):
 
     jobs = {}
 
-    def set_job(self, card, text, state="running"):
+    def set_job(self, card, text, state="running", workspace=None):
         """Show a job's progress on its card, or clear it with state=None. Main thread only;
         workers go through `job()`. A failed job stays until the card's next job replaces it."""
         key = job_key(card)
@@ -365,13 +391,14 @@ class Desk(App):
             self.jobs.pop(key, None)
         else:
             since = self.jobs[key]["since"] if key in self.jobs and self.jobs[key]["state"] == "running" == state else time.time()
-            self.jobs[key] = {"text": text, "state": state, "since": since}
+            workspace = workspace or (self.jobs.get(key) or {}).get("workspace")
+            self.jobs[key] = {"text": text, "state": state, "since": since, "workspace": workspace}
         for w in self.query(Card):
             if job_key(w.data) == key:
                 w.refresh(layout=True)
 
-    def job(self, card, text, state="running"):
-        self.call_from_thread(self.set_job, card, text, state)
+    def job(self, card, text, state="running", workspace=None):
+        self.call_from_thread(self.set_job, card, text, state, workspace)
 
     def _tick(self):
         # Elapsed time on running jobs; nothing to redraw when none runs.
@@ -406,7 +433,7 @@ class Desk(App):
         if not board:
             return
         self.board = board
-        focused = self.focused.data["path"] if isinstance(self.focused, Card) else None
+        focused = card_id(self.focused.data) if isinstance(self.focused, Card) else getattr(self, "_last_card_id", None)
         for col in self.query(Column):
             col.fill(board["columns"].get(col.key, []), self.needle, self.show_drafts)
         import time as _t
@@ -419,8 +446,16 @@ class Desk(App):
         # keystrokes to the board, where letters such as l, c, x and v are actions.
         if isinstance(self.focused, Input):
             return
+        # The columns mount their new cards on the next refresh; focusing before then would
+        # pick a card that is being removed.
+        self.call_after_refresh(self._refocus, focused)
+
+    def _refocus(self, key):
+        """Focus the card with this identity wherever it now sits, else the first card."""
+        if isinstance(self.focused, Input):
+            return
         cards = list(self.query(Card))
-        target = next((c for c in cards if c.data["path"] == focused), cards[0] if cards else None)
+        target = next((c for c in cards if card_id(c.data) == key), cards[0] if cards else None)
         if target:
             target.focus()
 
@@ -448,6 +483,7 @@ class Desk(App):
 
     def on_descendant_focus(self, event):
         if isinstance(event.widget, Card):
+            self._last_card_id = card_id(event.widget.data)
             ci, _ = self._pos()
             self._col_cards = {**getattr(self, "_col_cards", {}), ci: (event.widget.data["repo"], event.widget.data["branch"])}
 
@@ -482,9 +518,16 @@ class Desk(App):
 
     def action_focus_ws(self):
         c = self.card()
-        if c and c.get("workspace_id"):
-            sh("herdr", "workspace", "focus", c["workspace_id"])
-        elif c:
+        if not c:
+            return
+        # A workspace this board just opened is known before the collector next sees it.
+        job = self.jobs.get(job_key(c)) or {}
+        ws = c.get("workspace_id") or job.get("workspace")
+        if ws:
+            sh("herdr", "workspace", "focus", ws)
+            if job.get("state") == "done":
+                self.set_job(c, None, None)
+        else:
             self.notify("no open workspace — press a to launch one", severity="warning")
 
     def action_open_url(self, url):
@@ -637,6 +680,8 @@ class Desk(App):
             pane = opened["root_pane"]["pane_id"]
         except Exception:
             return failed("herdr worktree open failed: " + ((o.stderr or o.stdout).strip().splitlines() or ["no output"])[-1][:140])
+        # From here Enter on the card goes to the workspace, whatever the job's state.
+        self.job(c, "opening the workspace", workspace=opened["root_pane"]["workspace_id"])
         name = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in (issue["id"] if issue else c["branch"]).lower()).strip("-")[:28]
         if not name[:1].isalpha():
             name = "t-" + name
@@ -670,9 +715,9 @@ class Desk(App):
             brief = fill(config.BRIEF, config.DEFAULT_BRIEF, fields)
         if brief and not self._brief(c, label, name, brief):
             return
-        self.job(c, None, None)
-        alert(f"{label} is ready", f"{config.AGENT_KIND} is " + ("working on its brief" if brief else "waiting in its workspace")
-              + ". Enter on its Desk card goes there.")
+        doing = "working on its brief" if brief else "waiting for you"
+        self.job(c, f"{config.AGENT_KIND} is {doing} · Enter opens it", "done")
+        alert(f"{label} is ready", f"{config.AGENT_KIND} is {doing} in the {label} workspace.")
         self.load()
 
     def _shell_panes(self, ws):
