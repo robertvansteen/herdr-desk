@@ -67,6 +67,23 @@ def elapsed(since):
     return f"{secs}s" if secs < 60 else f"{secs // 60}m"
 
 
+def cause(output):
+    """The line of a failed command's output that says why, for a one-line card.
+
+    wt ends its errors with a hint (a "↳ To switch …, run …" line) and pre-switch hooks
+    print their own warnings first, so neither the first nor the last line is the reason;
+    the line marked ✗, or an error/fatal line, is.
+    """
+    lines = [l.strip() for l in (output or "").splitlines() if l.strip()]
+    for l in lines:
+        if l.startswith("✗"):
+            return l.lstrip("✗ ").strip()
+    for l in lines:
+        if l.lower().startswith(("error:", "fatal:")):
+            return l
+    return lines[-1] if lines else "no output"
+
+
 def card_id(card):
     """A card's identity across refreshes, which rebuild every card and may move it to
     another column: its repo, branch and worktree path."""
@@ -429,7 +446,7 @@ class Desk(App):
 
     jobs = {}
 
-    def set_job(self, card, text, state="running", workspace=None):
+    def set_job(self, card, text, state="running", workspace=None, detail=""):
         """Show a job's progress on its card, or clear it with state=None. Main thread only;
         workers go through `job()`. A failed job stays until the card's next job replaces it."""
         key = job_key(card)
@@ -438,13 +455,13 @@ class Desk(App):
         else:
             since = self.jobs[key]["since"] if key in self.jobs and self.jobs[key]["state"] == "running" == state else time.time()
             workspace = workspace or (self.jobs.get(key) or {}).get("workspace")
-            self.jobs[key] = {"text": text, "state": state, "since": since, "workspace": workspace}
+            self.jobs[key] = {"text": text, "state": state, "since": since, "workspace": workspace, "detail": detail}
         for w in self.query(Card):
             if job_key(w.data) == key:
                 w.refresh(layout=True)
 
-    def job(self, card, text, state="running", workspace=None):
-        self.call_from_thread(self.set_job, card, text, state, workspace)
+    def job(self, card, text, state="running", workspace=None, detail=""):
+        self.call_from_thread(self.set_job, card, text, state, workspace, detail)
 
     def _tick(self):
         # Elapsed time on running jobs; nothing to redraw when none runs.
@@ -698,8 +715,8 @@ class Desk(App):
         # A Linear branch name is long; the issue id is what you scan the sidebar for.
         label = issue["id"] if issue else c["branch"]
 
-        def failed(msg):
-            self.job(c, msg, "failed")
+        def failed(msg, output=""):
+            self.job(c, msg, "failed", detail=output)
             alert(f"{label}: launch failed", msg, "request")
 
         repo_root = os.path.join(config.REPOS_DIR, c["repo"])
@@ -715,7 +732,7 @@ class Desk(App):
             except Exception:
                 path = None
             if not path:
-                return failed("wt switch failed: " + ((r.stderr or r.stdout).strip().splitlines() or ["no output"])[-1][:140])
+                return failed("wt switch failed: " + cause(r.stderr or r.stdout), (r.stderr or r.stdout).strip())
         self.job(c, "opening the workspace")
         o = sh("herdr", "worktree", "open", "--cwd", repo_root, "--path", path, "--label", label, "--no-focus", "--json")
         try:
@@ -982,6 +999,12 @@ class Details(ModalScreen):
         for a in c.get("agents", []):
             L += ["", f"{STATUS_GLYPH.get(a['status'], '?')} {a['kind']} {a['status']} for {days(a['since_days'])}  [dim]{a['workspace_id']} {a['pane_id']}[/dim]", f"  {escape(a['title'])}"]
             if a.get("session"): L.append(f"  [dim]resume:[/dim] claude --resume {a['session']}")
+        job = self.app.jobs.get(job_key(c)) or {}
+        if job.get("state") == "failed":
+            L += ["", f"[$red]✗ {escape(job['text'])}[/$red]"]
+            # The command's own output, without the hook scripts it echoes as it runs them.
+            L += [f"  [dim]{escape(l)}[/dim]" for l in (job.get("detail") or "").splitlines()
+                  if l.strip() and not l.startswith("  ")][-12:]
         L += ["", "[dim]Esc / Space to close[/dim]"]
         yield Static("\n".join(L))
 
