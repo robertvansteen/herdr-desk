@@ -30,7 +30,9 @@ left to wt-reap and do not appear.
 Column rules, first match wins:
   todo      — an assigned Linear issue in a Todo state with nothing local. `a`
               on it asks for a repo and starts a worktree on Linear's branch name.
-  your_move — someone asked you to review their PR; or a ready PR
+  your_move — someone asked you to review their PR; or one of your worktrees in repos_dir
+              holds commits from the last week that are on no remote, with no PR or
+              session to show them; or a ready PR
               has changes requested, failing checks or merge conflicts;
               or an agent is `blocked` (needs an approval) or `done` (finished,
               unseen); or a PR is a draft older than a day; or an agent is idle
@@ -340,6 +342,9 @@ def awaiting_you(pr):
     return None
 
 
+UNPUSHED_DAYS = 7
+
+
 def place(c):
     """(column, reason) for one card, by the rules in the module docstring; column is None for
     a card that is not shown, and reason is set only for your_move."""
@@ -370,6 +375,13 @@ def place(c):
                             + (["CI red"] if pr["checks"] == "fail" else []))
     elif not pr and "idle" in statuses and "working" not in statuses:
         reason = "waiting for prompt" + (f", idle {idle_days:.0f}d" if idle_days >= 1 else "")
+    elif not pr and not ag and c.get("unpushed") and c.get("own_worktree") and (c.get("commit_days") or 99) <= UNPUSHED_DAYS:
+        # Committed work that exists only in this worktree: removing it would lose the work,
+        # and with no PR or session nothing else on the board shows it. Only worktrees placed
+        # in repos_dir count, which is where wt puts yours; agents' own worktrees
+        # (.claude/worktrees) and scratch clones hold dozens of throwaway commits. Old ones
+        # are mostly squash-merged branches whose originals never reached a remote.
+        reason = f"{c['unpushed']} commit(s) not pushed, no PR"
     elif c.get("dirty", 0) >= 3 and (ag or pr) and "working" not in statuses:
         # Uncommitted work only counts as yours to move when a session or PR makes it live.
         # A bare worktree with stray files is wt-reap's review list, not a card.
@@ -450,9 +462,15 @@ def collect():
             c = card(name, branch or f"detached@{os.path.basename(path)}")
             c["path"] = path
             dirty, _ = sh(["git", "status", "--porcelain"], path)
-            ahead, rc = sh(["git", "rev-list", "--count", "@{u}..HEAD"], path)
+            # Commits on no remote at all, not commits ahead of the upstream: a branch that was
+            # never pushed has no upstream, and would count as fully pushed.
+            ahead, rc = sh(["git", "rev-list", "--count", "HEAD", "--not", "--remotes"], path)
             c["dirty"] = len(dirty.splitlines()) if dirty else 0
-            c["unpushed"] = int(ahead) if rc == 0 and ahead.isdigit() else 0
+            c["unpushed"] = int(ahead) if rc == 0 and ahead.strip().isdigit() else 0
+            if c["unpushed"]:
+                last, _ = sh(["git", "log", "-1", "--format=%ct"], path)
+                c["commit_days"] = (now() - int(last)) / 86400 if last.strip().isdigit() else None
+                c["own_worktree"] = os.path.dirname(path) == DEV
 
     previous_conflicts = {}
     try:
@@ -494,7 +512,7 @@ def collect():
                                 if r.get("author") and r["author"].get("__typename") != "Bot"
                                 and r["author"]["login"] != (pr.get("author") or {}).get("login")],
                     "updated_days": iso_age_days(pr.get("updatedAt")), "created_days": iso_age_days(pr.get("createdAt")),
-                    "merged": bool(pr.get("mergedAt")), "size": f'+{pr.get("additions",0)} -{pr.get("deletions",0)}',
+                    "merged": bool(pr.get("mergedAt")), "merged_at": pr.get("mergedAt"), "size": f'+{pr.get("additions",0)} -{pr.get("deletions",0)}',
                     # GitHub computes mergeability lazily: UNKNOWN means "not yet", not "clean",
                     # so the previous snapshot's answer is kept until GitHub commits to one.
                     "conflicts": (previous_conflicts.get((name, pr["headRefName"])) if pr.get("mergeable") == "UNKNOWN"
@@ -506,6 +524,14 @@ def collect():
                 }
                 if not c["ticket"]:
                     c["ticket"] = ticket(pr["title"])
+
+    # A squash merge leaves a branch's original commits on no remote, though the PR carries
+    # their work; only commits made after the merge are work that exists nowhere else.
+    for c in cards.values():
+        pr = c.get("pr") or {}
+        if c.get("unpushed") and pr.get("merged_at") and c.get("path"):
+            ahead, rc = sh(["git", "rev-list", "--count", f"--since={pr['merged_at']}", "HEAD", "--not", "--remotes"], c["path"])
+            c["unpushed"] = int(ahead) if rc == 0 and ahead.strip().isdigit() else 0
 
     # A review request is its own card: the branch is someone else's, so it never joins a
     # worktree or session of yours, and the repo needs no clone for the review command.
@@ -566,7 +592,7 @@ def collect():
             columns[key].append(c)
         # else: bare worktree with nothing attached, not shown
 
-    URGENCY = ["changes requested", "checks failing", "merge conflicts", "agent needs you", "review requested", "uncommitted", "agent finished", "in linear", "waiting for prompt", "reply to comments", "no reviewer", "draft"]
+    URGENCY = ["changes requested", "checks failing", "merge conflicts", "agent needs you", "review requested", "uncommitted", "agent finished", "in linear", "waiting for prompt", "not pushed", "reply to comments", "no reviewer", "draft"]
 
     def urgency(c):
         """Approved PRs first: one rebase or one CI fix from merging, they are the cheapest

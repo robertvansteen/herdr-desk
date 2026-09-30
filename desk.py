@@ -302,7 +302,7 @@ class Card(Static):
 
         # 5. Reason, only when the status line has not already said it.
         reason = c.get("reason")
-        if reason and "uncommitted" in reason and (c.get("dirty") or c.get("unpushed")):
+        if reason and ("uncommitted" in reason or "not pushed" in reason) and (c.get("dirty") or c.get("unpushed")):
             reason = None   # the ✎ line above already says it
         if reason and reason.lower() not in said and not (reason.startswith("draft") and "draft" in said):
             lines.append(f"[b {self.accent}]▶ {escape(fit(reason, w - 2))}[/b {self.accent}]")

@@ -43,6 +43,14 @@ assert place(card(pr(reviewers=[], reviews=[], review="APPROVED"))) == ("waiting
 assert place(card(pr(reviewers=[], reviews=[], draft=True))) == ("waiting", None)
 assert place(card(pr(reviewers=[]))) == ("waiting", None)   # no reviews collected: no evidence
 
+own = {"own_worktree": True, "commit_days": 1}
+assert place(card(unpushed=7, **own)) == ("your_move", "7 commit(s) not pushed, no PR")
+assert place(card(unpushed=0, **own)) == (None, None)
+assert place(card(pr(), unpushed=3, **own)) == ("waiting", None)   # the PR shows the work
+assert place(card(unpushed=2, dirty=5, **own)) == ("your_move", "2 commit(s) not pushed, no PR")
+assert place(card(unpushed=7, own_worktree=False, commit_days=1)) == (None, None)   # an agent's worktree
+assert place(card(unpushed=7, own_worktree=True, commit_days=30)) == (None, None)   # likely squash-merged
+
 assert place(card(pr(merged=True))) == ("landed", None)
 assert place(card(pr(merged=True), path=None)) == (None, None)
 assert place(card()) == (None, None)
