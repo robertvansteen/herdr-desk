@@ -20,4 +20,4 @@ command = ["bash", "-c", "exec bash \"$HERDR_PLUGIN_ROOT/open.sh\""]
 id = "board"
 title = "Desk"
 placement = "tab"
-command = ["bash", "-c", "exec bash \"$HERDR_PLUGIN_ROOT/board.sh\""]
+command = ["bash", "-c", "exec bash \"$HERDR_PLUGIN_ROOT/desk\""]

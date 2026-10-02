@@ -34,6 +34,8 @@ The install runs `install.sh`, which creates `.venv` with the pinned Textual ver
 
 Bind the `desk.open` action to a key in your Herdr config. The action opens the board in a workspace labelled "Desk", or focuses that workspace if it already exists.
 
+Or run `./desk` in any pane to start the board there. It runs the code of the checkout it lives in (symlinks onto `PATH` work) and creates that checkout's `.venv` on first run, so each worktree can run its own version. Versions share the state directory; set `XDG_STATE_HOME` to keep one apart.
+
 ## Configuration
 
 Settings live in `~/.config/desk/config.toml`, or in the file `$DESK_CONFIG` points to. Every key is optional; [`config.example.toml`](config.example.toml) lists them with their defaults.

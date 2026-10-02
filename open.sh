@@ -15,5 +15,5 @@ pane=$(jq -r '.result.root_pane.pane_id' <<<"$created")
 "$herdr" pane rename "$pane" Desk >/dev/null 2>&1
 # `exec` replaces the shell so quitting the board closes the pane, and the shell
 # does not swallow the first frames before the app takes over.
-"$herdr" pane run "$pane" "exec bash '$root/board.sh'" >/dev/null
+"$herdr" pane run "$pane" "exec '$root/desk'" >/dev/null
 exec "$herdr" workspace focus "$ws"
